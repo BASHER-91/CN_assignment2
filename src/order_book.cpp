@@ -49,46 +49,58 @@ OrderBook::CancelStatus OrderBook::cancel(int order_id,
 void OrderBook::match_incoming(Order& incoming, std::vector<Trade>* trades) {
   auto& opp_map = incoming.is_buy ? sells_[incoming.instrument_id]
                                   : buys_[incoming.instrument_id];
-  std::deque<int>& opp = opp_map[incoming.price];
+  // Look the price level up instead of indexing it: operator[] would insert an
+  // empty deque for every price ever quoted on the opposite side and never
+  // remove it again.
+  const auto opp_it = opp_map.find(incoming.price);
+  if (opp_it != opp_map.end()) {
+    std::deque<int>& opp = opp_it->second;
 
-  while (incoming.remaining_qty > 0) {
-    while (!opp.empty()) {
-      const int oid = opp.front();
-      auto it = by_id_.find(oid);
-      if (it == by_id_.end() || it->second.remaining_qty == 0) {
-        opp.pop_front();
-        continue;
+    while (incoming.remaining_qty > 0) {
+      // Skip fronts that were cancelled or fully filled (lazy deletion).
+      auto rest_it = by_id_.end();
+      while (!opp.empty()) {
+        rest_it = by_id_.find(opp.front());
+        if (rest_it == by_id_.end() || rest_it->second.remaining_qty == 0) {
+          opp.pop_front();
+          rest_it = by_id_.end();
+          continue;
+        }
+        break;
       }
-      break;
+      if (rest_it == by_id_.end()) {
+        break;
+      }
+
+      Order& rest = rest_it->second;
+      const int tq = std::min(incoming.remaining_qty, rest.remaining_qty);
+      incoming.remaining_qty -= tq;
+      rest.remaining_qty -= tq;
+
+      Trade tr;
+      tr.instrument_id = incoming.instrument_id;
+      tr.qty = tq;
+      tr.price = incoming.price;
+      if (incoming.is_buy) {
+        tr.buy_fd = incoming.owner_fd;
+        tr.buy_session = incoming.session_id;
+        tr.sell_fd = rest.owner_fd;
+        tr.sell_session = rest.session_id;
+      } else {
+        tr.buy_fd = rest.owner_fd;
+        tr.buy_session = rest.session_id;
+        tr.sell_fd = incoming.owner_fd;
+        tr.sell_session = incoming.session_id;
+      }
+      trades->push_back(tr);
+
+      if (rest.remaining_qty == 0) {
+        opp.pop_front();
+      }
     }
+
     if (opp.empty()) {
-      break;
-    }
-
-    Order& rest = by_id_[opp.front()];
-    const int tq = std::min(incoming.remaining_qty, rest.remaining_qty);
-    incoming.remaining_qty -= tq;
-    rest.remaining_qty -= tq;
-
-    Trade tr;
-    tr.instrument_id = incoming.instrument_id;
-    tr.qty = tq;
-    tr.price = incoming.price;
-    if (incoming.is_buy) {
-      tr.buy_fd = incoming.owner_fd;
-      tr.buy_session = incoming.session_id;
-      tr.sell_fd = rest.owner_fd;
-      tr.sell_session = rest.session_id;
-    } else {
-      tr.buy_fd = rest.owner_fd;
-      tr.buy_session = rest.session_id;
-      tr.sell_fd = incoming.owner_fd;
-      tr.sell_session = incoming.session_id;
-    }
-    trades->push_back(tr);
-
-    if (rest.remaining_qty == 0) {
-      opp.pop_front();
+      opp_map.erase(opp_it);
     }
   }
 

@@ -1,8 +1,16 @@
 #!/bin/sh
+# Market-Data Client launcher.
+#   ./client/run-market-data <host> <port> [instrument]
 set -e
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 BIN="$ROOT/src/market_data"
-if [ ! -x "$BIN" ]; then
-  (cd "$ROOT/src" && make)
-fi
+
+# Always build: a binary shipped from another platform would be unusable here,
+# and build chatter must not pollute this program's stdout.
+(cd "$ROOT/src" && make market_data) >&2
+
+# A submission pipeline can strip the executable bit; make would then see an
+# up-to-date target and do nothing, leaving exec to fail with EACCES.
+[ -x "$BIN" ] || chmod +x "$BIN"
+
 exec "$BIN" "$@"

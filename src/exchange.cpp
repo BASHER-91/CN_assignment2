@@ -2,10 +2,13 @@
 
 #include "net.hpp"
 
-#include <cerrno>
 #include <sys/event.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+#include <algorithm>
+#include <cerrno>
+#include <cstdint>
 
 namespace {
 
@@ -31,16 +34,43 @@ std::vector<int>& Exchange::subs(int instrument_id) {
   return (instrument_id == kInstJnst) ? subs_jnst_ : subs_imct_;
 }
 
-void Exchange::add_client(int fd) {
+std::uint64_t Exchange::session_of(int fd) const {
+  if (!valid_fd(fd)) {
+    return 0;
+  }
+  return clients_[fd].session_id;
+}
+
+void Exchange::erase_from_subs(int fd) {
+  for (int inst = 0; inst < kNumInstruments; ++inst) {
+    std::vector<int>& v = subs(inst);
+    std::size_t i = 0;
+    while (i < v.size()) {
+      if (v[i] == fd) {
+        v[i] = v.back();
+        v.pop_back();
+        continue;
+      }
+      ++i;
+    }
+  }
+}
+
+std::uint64_t Exchange::add_client(int fd) {
   if (fd < 0) {
-    return;
+    return 0;
   }
   if (fd >= static_cast<int>(clients_.size())) {
-    clients_.resize(static_cast<std::size_t>(fd) + 1);
+    // Grow geometrically. Resizing to exactly fd + 1 would move the whole
+    // table on every accept once descriptors climb past the initial size,
+    // making accepts quadratic during the 70k-connection experiment.
+    const std::size_t needed = static_cast<std::size_t>(fd) + 1;
+    clients_.resize(std::max(needed, clients_.size() * 2));
   }
   Connection& c = clients_[fd];
   c = Connection{};
   c.session_id = next_session_++;
+  return c.session_id;
 }
 
 void Exchange::teardown(int fd) {
@@ -57,6 +87,7 @@ void Exchange::teardown(int fd) {
       usernames_.erase(it);
     }
   }
+  erase_from_subs(fd);
   c.session_id = 0;
   c.role = Role::Unknown;
   c.username.clear();
@@ -67,7 +98,25 @@ void Exchange::teardown(int fd) {
   c.out_buf.clear();
   c.out_buf.shrink_to_fit();
   c.write_armed = false;
+  c.closing_after_write = false;
   close_fd(fd);
+}
+
+void Exchange::close_after_flush(int fd) {
+  if (!valid_fd(fd) || clients_[fd].session_id == 0) {
+    return;
+  }
+  Connection& c = clients_[fd];
+  c.closing_after_write = true;
+  c.in_buf.clear();
+  if (c.out_buf.empty()) {
+    teardown(fd);
+    return;
+  }
+  struct kevent ev;
+  EV_SET(&ev, fd, EVFILT_READ, EV_DELETE, 0, 0, nullptr);
+  kevent(kq_, &ev, 1, nullptr, 0, nullptr);
+  arm_write(fd);
 }
 
 void Exchange::arm_write(int fd) {
@@ -75,7 +124,9 @@ void Exchange::arm_write(int fd) {
     return;
   }
   struct kevent ev;
-  EV_SET(&ev, fd, EVFILT_WRITE, EV_ADD, 0, 0, nullptr);
+  EV_SET(&ev, fd, EVFILT_WRITE, EV_ADD, 0, 0,
+         reinterpret_cast<void*>(
+             static_cast<std::uintptr_t>(clients_[fd].session_id)));
   if (kevent(kq_, &ev, 1, nullptr, 0, nullptr) < 0) {
     teardown(fd);
     return;
@@ -89,7 +140,11 @@ void Exchange::disarm_write(int fd) {
   }
   struct kevent ev;
   EV_SET(&ev, fd, EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);
-  kevent(kq_, &ev, 1, nullptr, 0, nullptr);
+  if (kevent(kq_, &ev, 1, nullptr, 0, nullptr) < 0 && errno != ENOENT) {
+    // The filter is still registered, so leave write_armed set rather than
+    // letting our state drift from the kernel's.
+    return;
+  }
   clients_[fd].write_armed = false;
 }
 
@@ -113,14 +168,24 @@ void Exchange::flush(int fd) {
     return;
   }
   disarm_write(fd);
+  if (valid_fd(fd) && clients_[fd].session_id != 0 &&
+      clients_[fd].closing_after_write) {
+    teardown(fd);
+  }
 }
 
 void Exchange::enqueue(int fd, const std::string& line) {
   if (!valid_fd(fd) || clients_[fd].session_id == 0) {
     return;
   }
-  clients_[fd].out_buf += line;
-  clients_[fd].out_buf += '\n';
+  Connection& c = clients_[fd];
+  if (c.out_buf.size() + line.size() + 1 > kMaxOutBuf) {
+    // The peer has stopped reading and is now consuming unbounded memory.
+    teardown(fd);
+    return;
+  }
+  c.out_buf += line;
+  c.out_buf += '\n';
   flush(fd);
 }
 
@@ -133,7 +198,7 @@ void Exchange::on_write(int fd) {
 
 void Exchange::process_buffer(int fd) {
   Connection& c = clients_[fd];
-  while (c.session_id != 0) {
+  while (c.session_id != 0 && !c.closing_after_write) {
     const std::size_t pos = c.in_buf.find('\n');
     if (pos == std::string::npos) {
       break;
@@ -154,36 +219,47 @@ void Exchange::on_read(int fd, bool eof) {
   }
 
   char buf[kRecvChunk];
-  const ssize_t n = recv(fd, buf, sizeof(buf), 0);
-  if (n > 0) {
-    Connection& c = clients_[fd];
-    if (c.in_buf.size() + static_cast<std::size_t>(n) > kMaxInBuf) {
-      teardown(fd);
+  for (;;) {
+    const ssize_t n = recv(fd, buf, sizeof(buf), 0);
+    if (n > 0) {
+      Connection& c = clients_[fd];
+      if (c.in_buf.size() + static_cast<std::size_t>(n) > kMaxInBuf) {
+        teardown(fd);
+        return;
+      }
+      c.in_buf.append(buf, static_cast<std::size_t>(n));
+      process_buffer(fd);
+      if (!valid_fd(fd) || clients_[fd].session_id == 0 ||
+          clients_[fd].closing_after_write) {
+        return;
+      }
+      if (!eof) {
+        return;
+      }
+      // EV_EOF can arrive with more than one recv chunk still buffered.
+      continue;
+    }
+
+    if (n == 0) {
+      process_buffer(fd);
+      close_after_flush(fd);
       return;
     }
-    c.in_buf.append(buf, static_cast<std::size_t>(n));
-    process_buffer(fd);
-    if (!valid_fd(fd) || clients_[fd].session_id == 0) {
+    if (errno == EINTR) {
+      continue;
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      if (eof) {
+        process_buffer(fd);
+        close_after_flush(fd);
+      }
       return;
     }
-    if (eof) {
-      process_buffer(fd);
-      teardown(fd);
-    }
+
+    // Hard error (RST / ECONNRESET / EPIPE): the peer cannot receive replies.
+    teardown(fd);
     return;
   }
-
-  if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-    if (eof) {
-      process_buffer(fd);
-      teardown(fd);
-    }
-    return;
-  }
-
-  // n == 0 (FIN) or a hard error (RST / ECONNRESET / EPIPE)
-  process_buffer(fd);
-  teardown(fd);
 }
 
 void Exchange::handle_command(int fd, const Command& cmd) {
@@ -193,7 +269,7 @@ void Exchange::handle_command(int fd, const Command& cmd) {
     return;
   }
   if (cmd.type == CmdType::Quit) {
-    teardown(fd);
+    close_after_flush(fd);
     return;
   }
 
@@ -277,13 +353,11 @@ void Exchange::handle_order(int fd, const Command& cmd, bool is_buy) {
     return;
   }
   enqueue(fd, msg_order_accepted(oid));
+  // Every trade is reported even if this trader disconnects part-way through:
+  // notify_trade() checks each side's session before sending BOUGHT/SOLD and
+  // still broadcasts TRADE to subscribers.
   for (const Trade& t : trades) {
     notify_trade(t);
-    if (!live(fd, c.session_id)) {
-      // Incoming trader disconnected while notifying; remaining TRADE
-      // broadcasts still required.
-      continue;
-    }
   }
 }
 
@@ -313,9 +387,17 @@ void Exchange::handle_subscribe(int fd, const Command& cmd) {
   }
   c.role = Role::MarketData;
   std::uint64_t& slot = sub_session(c, cmd.instrument);
-  if (slot != c.session_id) {
-    slot = c.session_id;
-    subs(cmd.instrument).push_back(fd);
+  slot = c.session_id;
+  std::vector<int>& v = subs(cmd.instrument);
+  bool present = false;
+  for (int existing : v) {
+    if (existing == fd) {
+      present = true;
+      break;
+    }
+  }
+  if (!present) {
+    v.push_back(fd);
   }
   enqueue(fd, msg_ok());
 }
@@ -357,11 +439,11 @@ void Exchange::broadcast_trade(int instrument_id, int qty, int price) {
       continue;
     }
     enqueue(sfd, msg_trade(instrument_id, qty, price));
-    if (!valid_fd(sfd) || clients_[sfd].session_id == 0) {
-      v[i] = v.back();
-      v.pop_back();
-      continue;
+    // enqueue() can fail and teardown(sfd), which removes sfd from this
+    // vector. In that case a different subscriber was swapped into index i;
+    // process it next instead of deleting or skipping it.
+    if (i < v.size() && v[i] == sfd) {
+      ++i;
     }
-    ++i;
   }
 }

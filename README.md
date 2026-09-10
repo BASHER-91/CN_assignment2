@@ -15,9 +15,11 @@ The Makefile is located in the `src/` directory. To build, run:
 cd src && make
 ```
 
-This produces `src/exchange_server`, `src/trader`, and `src/market_data`. `cd src && make clean` removes objects and binaries.
+This produces `src/exchange_server`, `src/trader`, and `src/market_data`. `cd src && make clean` removes objects, dependency files, and binaries.
 
-The launcher scripts build automatically if a binary is missing.
+The launcher scripts always run `make` before exec'ing their binary, so a stale or foreign-platform build is never used. Build output goes to stderr to keep each program's stdout clean.
+
+**Before packaging the submission ZIP, run `cd src && make clean`.** Compiled binaries are platform-specific; shipping a locally built binary would be unusable on the grading machine.
 
 ## Running
 
@@ -41,9 +43,13 @@ Market-data stdin: `SUBSCRIBE`, `UNSUBSCRIBE`, `QUIT`. If a third launcher argum
 
 While not mandated by the spec, a **64 KiB** read buffer limit per connection is enforced to prevent memory exhaustion from malicious/unterminated streams. A connection that exceeds the cap is dropped and its `in_buf` / `out_buf` storage is released.
 
+A matching **4 MiB** outbound backlog limit applies per connection. The limit is deliberately generous so a slow reader still builds a visible `Send-Q` for Experiment 7, but a client that never reads cannot grow server memory without bound.
+
+If `accept()` fails because the process is out of file descriptors, the server releases a reserved descriptor, drains the pending backlog, and logs the condition once. Without that, the level-triggered listening socket would report the same pending connection forever and spin the event loop at 100% CPU.
+
 ## Implementation notes (for the experiment report)
 
-**I/O:** The server is a single-threaded, **level-triggered `kqueue`** loop. Each `EVFILT_READ` does one `recv()`. Outbound data is written with non-blocking `send()` (including short counts). Leftover bytes arm `EVFILT_WRITE`; an empty buffer deletes that filter so a writable socket does not busy-spin.
+**I/O:** The server is a single-threaded, **level-triggered `kqueue`** loop. Ordinary `EVFILT_READ` events do one `recv()`; `EV_EOF` drains all pre-FIN bytes before close. Outbound data is written with non-blocking `send()` (including short counts). Leftover bytes arm `EVFILT_WRITE`; an empty buffer deletes that filter so a writable socket does not busy-spin. `QUIT` closes after already-queued replies flush. Clients also use buffered non-blocking writes so sending commands cannot stall asynchronous notifications.
 
 This is the right scaling story for the 70k idle-connection bonus:
 

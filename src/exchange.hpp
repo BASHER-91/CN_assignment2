@@ -20,6 +20,7 @@ struct Connection {
   std::string in_buf;
   std::string out_buf;
   bool write_armed = false;
+  bool closing_after_write = false;
 };
 
 class Exchange {
@@ -28,7 +29,9 @@ class Exchange {
 
   explicit Exchange(int kq);
 
-  void add_client(int fd);
+  // Returns the new session_id, or 0 on failure.
+  std::uint64_t add_client(int fd);
+  std::uint64_t session_of(int fd) const;
   void on_read(int fd, bool eof);
   void on_write(int fd);
   void teardown(int fd);
@@ -36,6 +39,8 @@ class Exchange {
  private:
   bool valid_fd(int fd) const;
   bool live(int fd, std::uint64_t session) const;
+  void erase_from_subs(int fd);
+  void close_after_flush(int fd);
   void enqueue(int fd, const std::string& line);
   void flush(int fd);
   void arm_write(int fd);

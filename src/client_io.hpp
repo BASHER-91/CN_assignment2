@@ -3,6 +3,7 @@
 
 #include <string>
 
+// Send everything, waiting for writability when the socket is non-blocking.
 bool send_all(int fd, const std::string& data);
 bool send_line(int fd, const std::string& line);
 

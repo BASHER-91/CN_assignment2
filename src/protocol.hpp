@@ -15,6 +15,12 @@ constexpr int kNumInstruments = 2;
 
 constexpr std::size_t kMaxInBuf = 64 * 1024;
 
+// Outbound backlog allowed per connection once the kernel send buffer is full.
+// Generous on purpose: a slow reader must be able to build a visible Send-Q
+// before we give up on it, but a client that never reads cannot grow the
+// server's memory without bound.
+constexpr std::size_t kMaxOutBuf = 4 * 1024 * 1024;
+
 enum class CmdType {
   Login,
   Buy,
