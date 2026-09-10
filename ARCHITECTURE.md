@@ -63,7 +63,7 @@ std::vector<Connection> clients(100000);  // clients[fd]
 
 The kernel reuses fds after `close()`. A new occupant of `clients[fd]` gets a **new** `session_id`. Orders and market-data subscriptions store that id. A reconnecting username does not inherit old orders or `BOUGHT`/`SOLD` (clarification on Piazza). Notifications are sent only if `clients[owner_fd].session_id` still matches.
 
-On teardown we remove this `fd` from both market-data subscriber lists (every occurrence), then `close(fd)` and clear `in_buf`/`out_buf` (including `shrink_to_fit()` after an oversize read) so a 64 KiB garbage stream does not leak. Price deques are still not scanned on disconnect. `UNSUBSCRIBE` still lazy-clears `sub_session_*`; the next `TRADE` swap-and-pops that slot. kqueue events carry `session_id` in `udata` so a recycled fd does not consume a stale READ/WRITE from the previous occupant.
+On teardown we remove this `fd` from both market-data subscriber lists, reset its `Connection`, and close it. Price deques are not scanned on disconnect. `UNSUBSCRIBE` only clears the session stored in `subscriptions[instrument]`; the next `TRADE` removes that stale slot. kqueue events carry `session_id` in `udata` so a recycled fd does not consume a stale READ/WRITE from the previous occupant.
 
 ## 5. Framing and protocol
 
@@ -91,13 +91,13 @@ Disconnect does not cancel resting orders. Later fills still `TRADE`; private `B
 
 ## 7. Market-data fan-out
 
-Subscribers are `std::vector<int>` of fds (`subs_jnst`, `subs_imct`), not a scan of all 100k slots.
+Subscribers are stored as one `std::vector<int>` of fds per instrument, not as a scan of all 100k connection slots.
 
-- **De-dup:** `SUBSCRIBE` sets `sub_session_*` and `push_back`s `fd` only if it is not already in that instrument’s vector (covers `UNSUBSCRIBE` then `SUBSCRIBE` with no intervening `TRADE`).
+- **De-dup:** `SUBSCRIBE` records the current `session_id` in `subscriptions[instrument]` and adds the fd only if it is not already in that instrument’s vector.
 - **Disconnect:** teardown erases this `fd` from both lists so a recycled fd cannot pair with a leftover entry and double-send `TRADE`.
-- **Lazy delete:** `UNSUBSCRIBE` only clears `sub_session_*`. On each `TRADE`, a slot is valid only if `role == MarketData` and `session_id == sub_session_*`. Otherwise swap-and-pop.
+- **Lazy delete:** `UNSUBSCRIBE` only clears `subscriptions[instrument]`. On each `TRADE`, a slot is valid only if `role == MarketData` and `session_id == subscriptions[instrument]`. Otherwise it is removed.
 
-`UNSUBSCRIBE` clears `sub_session_*` and replies `OK`; the next trade drops the stale fd.
+`UNSUBSCRIBE` replies `OK`; the next trade drops the stale fd.
 
 ## 8. SIGPIPE and teardown
 

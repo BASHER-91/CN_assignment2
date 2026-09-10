@@ -1,16 +1,9 @@
 #!/bin/sh
-# Trader Client launcher.
-#   ./client/run-trader <host> <port> <username>
 set -e
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 BIN="$ROOT/src/trader"
 
-# Always build: a binary shipped from another platform would be unusable here,
-# and build chatter must not pollute this program's stdout.
 (cd "$ROOT/src" && make trader) >&2
-
-# A submission pipeline can strip the executable bit; make would then see an
-# up-to-date target and do nothing, leaving exec to fail with EACCES.
 [ -x "$BIN" ] || chmod +x "$BIN"
 
 exec "$BIN" "$@"

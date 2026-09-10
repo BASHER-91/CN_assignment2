@@ -1,6 +1,4 @@
 #!/bin/sh
-# Print TCP sockets and states for a local port (FreeBSD / macOS).
-# Usage: ./experiments/observe.sh [port]
 PORT=${1:-5000}
 
 echo "=== sockstat (port $PORT) ==="

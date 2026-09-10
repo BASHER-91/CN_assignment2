@@ -2,22 +2,11 @@
 #include "net.hpp"
 #include "protocol.hpp"
 
-#include <cstdlib>
 #include <iostream>
 #include <string>
 
 static void usage(const char* argv0) {
   std::cerr << "usage: " << argv0 << " <host> <port> [instrument]\n";
-}
-
-static bool parse_port(const char* s, int* port) {
-  char* end = nullptr;
-  const long v = std::strtol(s, &end, 10);
-  if (end == s || *end != '\0' || v <= 0 || v > 65535) {
-    return false;
-  }
-  *port = static_cast<int>(v);
-  return true;
 }
 
 int main(int argc, char** argv) {

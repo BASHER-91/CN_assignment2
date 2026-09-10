@@ -4,6 +4,7 @@
 #include "order_book.hpp"
 #include "protocol.hpp"
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -15,8 +16,7 @@ struct Connection {
   std::uint64_t session_id = 0;
   Role role = Role::Unknown;
   std::string username;
-  std::uint64_t sub_session_jnst = 0;
-  std::uint64_t sub_session_imct = 0;
+  std::array<std::uint64_t, kNumInstruments> subscriptions{};
   std::string in_buf;
   std::string out_buf;
   bool write_armed = false;
@@ -29,7 +29,6 @@ class Exchange {
 
   explicit Exchange(int kq);
 
-  // Returns the new session_id, or 0 on failure.
   std::uint64_t add_client(int fd);
   std::uint64_t session_of(int fd) const;
   void on_read(int fd, bool eof);
@@ -54,14 +53,11 @@ class Exchange {
   void handle_unsubscribe(int fd, const Command& cmd);
   void notify_trade(const Trade& trade);
   void broadcast_trade(int instrument_id, int qty, int price);
-  std::uint64_t& sub_session(Connection& c, int instrument_id);
-  std::vector<int>& subs(int instrument_id);
 
   int kq_;
   std::vector<Connection> clients_;
   OrderBook book_;
-  std::vector<int> subs_jnst_;
-  std::vector<int> subs_imct_;
+  std::array<std::vector<int>, kNumInstruments> subscribers_;
   std::unordered_map<std::string, int> usernames_;
   std::uint64_t next_session_ = 1;
 };

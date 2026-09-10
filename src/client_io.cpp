@@ -11,6 +11,8 @@
 #include <iostream>
 #include <string>
 
+namespace {
+
 bool send_all(int fd, const std::string& data) {
   std::size_t off = 0;
   while (off < data.size()) {
@@ -23,8 +25,6 @@ bool send_all(int fd, const std::string& data) {
       continue;
     }
     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-      // Wait for writability so this helper is also correct on a non-blocking
-      // socket instead of reporting a spurious failure.
       struct pollfd p;
       p.fd = fd;
       p.events = POLLOUT;
@@ -38,16 +38,6 @@ bool send_all(int fd, const std::string& data) {
   }
   return true;
 }
-
-bool send_line(int fd, const std::string& line) {
-  std::string s = line;
-  if (s.empty() || s.back() != '\n') {
-    s.push_back('\n');
-  }
-  return send_all(fd, s);
-}
-
-namespace {
 
 void queue_line(std::string* out_buf, const std::string& line) {
   *out_buf += line;
@@ -86,7 +76,15 @@ void print_complete_lines(std::string* sock_buf) {
   }
 }
 
-}  // namespace
+}
+
+bool send_line(int fd, const std::string& line) {
+  std::string message = line;
+  if (message.empty() || message.back() != '\n') {
+    message.push_back('\n');
+  }
+  return send_all(fd, message);
+}
 
 int run_stdio_socket_loop(int sock) {
   if (set_nonblock(sock) < 0) {
@@ -124,8 +122,6 @@ int run_stdio_socket_loop(int sock) {
       return 1;
     }
 
-    // Read server messages before processing more stdin so asynchronous
-    // notifications are not delayed by client output.
     if (fds[1].revents & (POLLIN | POLLHUP | POLLERR)) {
       const ssize_t n = recv(sock, tmp, sizeof(tmp), 0);
       if (n > 0) {
@@ -142,14 +138,12 @@ int run_stdio_socket_loop(int sock) {
       }
     }
 
-    bool output_changed = false;
     if (stdin_open && (fds[0].revents & (POLLIN | POLLHUP | POLLERR))) {
       const ssize_t n = read(STDIN_FILENO, tmp, sizeof(tmp));
       if (n == 0) {
         stdin_open = false;
         shutdown_pending = true;
         queue_line(&out_buf, "QUIT");
-        output_changed = true;
       } else if (n < 0) {
         if (errno != EINTR) {
           return 1;
@@ -167,7 +161,6 @@ int run_stdio_socket_loop(int sock) {
             continue;
           }
           queue_line(&out_buf, line);
-          output_changed = true;
           if (line == "QUIT") {
             stdin_open = false;
             shutdown_pending = true;
@@ -178,11 +171,8 @@ int run_stdio_socket_loop(int sock) {
       }
     }
 
-    if (!out_buf.empty() &&
-        (output_changed || (fds[1].revents & POLLOUT))) {
-      if (!flush_nonblocking(sock, &out_buf)) {
-        return 1;
-      }
+    if (!out_buf.empty() && !flush_nonblocking(sock, &out_buf)) {
+      return 1;
     }
 
     if (shutdown_pending && out_buf.empty() && !write_shutdown) {

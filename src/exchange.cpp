@@ -4,7 +4,6 @@
 
 #include <sys/event.h>
 #include <sys/socket.h>
-#include <unistd.h>
 
 #include <algorithm>
 #include <cerrno>
@@ -14,7 +13,7 @@ namespace {
 
 constexpr std::size_t kRecvChunk = 4096;
 
-}  // namespace
+}
 
 Exchange::Exchange(int kq) : kq_(kq), clients_(kClientSlots) {}
 
@@ -26,14 +25,6 @@ bool Exchange::live(int fd, std::uint64_t session) const {
   return session != 0 && valid_fd(fd) && clients_[fd].session_id == session;
 }
 
-std::uint64_t& Exchange::sub_session(Connection& c, int instrument_id) {
-  return (instrument_id == kInstJnst) ? c.sub_session_jnst : c.sub_session_imct;
-}
-
-std::vector<int>& Exchange::subs(int instrument_id) {
-  return (instrument_id == kInstJnst) ? subs_jnst_ : subs_imct_;
-}
-
 std::uint64_t Exchange::session_of(int fd) const {
   if (!valid_fd(fd)) {
     return 0;
@@ -42,17 +33,10 @@ std::uint64_t Exchange::session_of(int fd) const {
 }
 
 void Exchange::erase_from_subs(int fd) {
-  for (int inst = 0; inst < kNumInstruments; ++inst) {
-    std::vector<int>& v = subs(inst);
-    std::size_t i = 0;
-    while (i < v.size()) {
-      if (v[i] == fd) {
-        v[i] = v.back();
-        v.pop_back();
-        continue;
-      }
-      ++i;
-    }
+  for (auto& subscribers : subscribers_) {
+    subscribers.erase(
+        std::remove(subscribers.begin(), subscribers.end(), fd),
+        subscribers.end());
   }
 }
 
@@ -61,9 +45,6 @@ std::uint64_t Exchange::add_client(int fd) {
     return 0;
   }
   if (fd >= static_cast<int>(clients_.size())) {
-    // Grow geometrically. Resizing to exactly fd + 1 would move the whole
-    // table on every accept once descriptors climb past the initial size,
-    // making accepts quadratic during the 70k-connection experiment.
     const std::size_t needed = static_cast<std::size_t>(fd) + 1;
     clients_.resize(std::max(needed, clients_.size() * 2));
   }
@@ -88,17 +69,7 @@ void Exchange::teardown(int fd) {
     }
   }
   erase_from_subs(fd);
-  c.session_id = 0;
-  c.role = Role::Unknown;
-  c.username.clear();
-  c.sub_session_jnst = 0;
-  c.sub_session_imct = 0;
-  c.in_buf.clear();
-  c.in_buf.shrink_to_fit();
-  c.out_buf.clear();
-  c.out_buf.shrink_to_fit();
-  c.write_armed = false;
-  c.closing_after_write = false;
+  c = Connection{};
   close_fd(fd);
 }
 
@@ -141,8 +112,6 @@ void Exchange::disarm_write(int fd) {
   struct kevent ev;
   EV_SET(&ev, fd, EVFILT_WRITE, EV_DELETE, 0, 0, nullptr);
   if (kevent(kq_, &ev, 1, nullptr, 0, nullptr) < 0 && errno != ENOENT) {
-    // The filter is still registered, so leave write_armed set rather than
-    // letting our state drift from the kernel's.
     return;
   }
   clients_[fd].write_armed = false;
@@ -180,7 +149,6 @@ void Exchange::enqueue(int fd, const std::string& line) {
   }
   Connection& c = clients_[fd];
   if (c.out_buf.size() + line.size() + 1 > kMaxOutBuf) {
-    // The peer has stopped reading and is now consuming unbounded memory.
     teardown(fd);
     return;
   }
@@ -236,7 +204,6 @@ void Exchange::on_read(int fd, bool eof) {
       if (!eof) {
         return;
       }
-      // EV_EOF can arrive with more than one recv chunk still buffered.
       continue;
     }
 
@@ -256,7 +223,6 @@ void Exchange::on_read(int fd, bool eof) {
       return;
     }
 
-    // Hard error (RST / ECONNRESET / EPIPE): the peer cannot receive replies.
     teardown(fd);
     return;
   }
@@ -312,7 +278,6 @@ void Exchange::handle_command(int fd, const Command& cmd) {
     return;
   }
 
-  // MarketData
   if (cmd.type == CmdType::Subscribe) {
     handle_subscribe(fd, cmd);
     return;
@@ -347,15 +312,12 @@ void Exchange::handle_order(int fd, const Command& cmd, bool is_buy) {
   std::vector<Trade> trades;
   const int oid =
       book_.submit(is_buy, cmd.instrument, cmd.qty, cmd.price, fd,
-                   c.session_id, &trades);
+                   c.session_id, trades);
   if (oid < 0) {
     enqueue(fd, msg_error("order id exhausted"));
     return;
   }
   enqueue(fd, msg_order_accepted(oid));
-  // Every trade is reported even if this trader disconnects part-way through:
-  // notify_trade() checks each side's session before sending BOUGHT/SOLD and
-  // still broadcasts TRADE to subscribers.
   for (const Trade& t : trades) {
     notify_trade(t);
   }
@@ -386,25 +348,17 @@ void Exchange::handle_subscribe(int fd, const Command& cmd) {
     return;
   }
   c.role = Role::MarketData;
-  std::uint64_t& slot = sub_session(c, cmd.instrument);
-  slot = c.session_id;
-  std::vector<int>& v = subs(cmd.instrument);
-  bool present = false;
-  for (int existing : v) {
-    if (existing == fd) {
-      present = true;
-      break;
-    }
-  }
-  if (!present) {
-    v.push_back(fd);
+  c.subscriptions[cmd.instrument] = c.session_id;
+  std::vector<int>& subscribers = subscribers_[cmd.instrument];
+  if (std::find(subscribers.begin(), subscribers.end(), fd) ==
+      subscribers.end()) {
+    subscribers.push_back(fd);
   }
   enqueue(fd, msg_ok());
 }
 
 void Exchange::handle_unsubscribe(int fd, const Command& cmd) {
-  Connection& c = clients_[fd];
-  sub_session(c, cmd.instrument) = 0;
+  clients_[fd].subscriptions[cmd.instrument] = 0;
   enqueue(fd, msg_ok());
 }
 
@@ -421,7 +375,7 @@ void Exchange::notify_trade(const Trade& trade) {
 }
 
 void Exchange::broadcast_trade(int instrument_id, int qty, int price) {
-  std::vector<int>& v = subs(instrument_id);
+  std::vector<int>& v = subscribers_[instrument_id];
   std::size_t i = 0;
   while (i < v.size()) {
     const int sfd = v[i];
@@ -431,7 +385,7 @@ void Exchange::broadcast_trade(int instrument_id, int qty, int price) {
       continue;
     }
     Connection& c = clients_[sfd];
-    const std::uint64_t want = sub_session(c, instrument_id);
+    const std::uint64_t want = c.subscriptions[instrument_id];
     if (c.role != Role::MarketData || c.session_id == 0 ||
         c.session_id != want) {
       v[i] = v.back();
@@ -439,9 +393,6 @@ void Exchange::broadcast_trade(int instrument_id, int qty, int price) {
       continue;
     }
     enqueue(sfd, msg_trade(instrument_id, qty, price));
-    // enqueue() can fail and teardown(sfd), which removes sfd from this
-    // vector. In that case a different subscriber was swapped into index i;
-    // process it next instead of deleting or skipping it.
     if (i < v.size() && v[i] == sfd) {
       ++i;
     }

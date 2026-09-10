@@ -9,7 +9,6 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <iostream>
 #include <string>
 
@@ -19,13 +18,6 @@ constexpr int kEventBatch = 64;
 
 int open_reserve_fd() { return open("/dev/null", O_RDONLY); }
 
-// Called when accept() fails because the process is out of file descriptors.
-//
-// The listening socket is registered level-triggered, so a connection left in
-// the backlog makes kevent() return immediately every time and the event loop
-// spins at 100% CPU. Releasing a reserved descriptor gives us the single slot
-// needed to accept() and immediately close() the queued connections, which
-// clears the backlog and lets the loop go back to sleep.
 void shed_pending_connections(int listen_fd, int* reserve_fd) {
   if (*reserve_fd >= 0) {
     close(*reserve_fd);
@@ -46,17 +38,7 @@ void usage(const char* argv0) {
             << "       default: 127.0.0.1 9000\n";
 }
 
-bool parse_port(const char* s, int* port) {
-  char* end = nullptr;
-  const long v = std::strtol(s, &end, 10);
-  if (end == s || *end != '\0' || v <= 0 || v > 65535) {
-    return false;
-  }
-  *port = static_cast<int>(v);
-  return true;
 }
-
-}  // namespace
 
 int main(int argc, char** argv) {
   ignore_sigpipe();
@@ -133,10 +115,7 @@ int main(int argc, char** argv) {
 
       if (fd == listen_fd) {
         for (;;) {
-          sockaddr_storage ss;
-          socklen_t slen = sizeof(ss);
-          const int cfd =
-              accept(listen_fd, reinterpret_cast<sockaddr*>(&ss), &slen);
+          const int cfd = accept(listen_fd, nullptr, nullptr);
           if (cfd < 0) {
             if (errno == EMFILE || errno == ENFILE) {
               if (!fd_limit_reported) {

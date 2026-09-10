@@ -6,7 +6,7 @@
 
 int OrderBook::submit(bool is_buy, int instrument_id, int qty, int price,
                       int owner_fd, std::uint64_t session_id,
-                      std::vector<Trade>* trades) {
+                      std::vector<Trade>& trades) {
   if (next_order_id_ < kOrderIdMin || next_order_id_ > kOrderIdMax) {
     return -1;
   }
@@ -14,7 +14,7 @@ int OrderBook::submit(bool is_buy, int instrument_id, int qty, int price,
   Order order;
   order.id = next_order_id_;
   if (next_order_id_ == kOrderIdMax) {
-    next_order_id_ = kOrderIdMin - 1;  // exhausted
+    next_order_id_ = kOrderIdMin - 1;
   } else {
     ++next_order_id_;
   }
@@ -46,18 +46,14 @@ OrderBook::CancelStatus OrderBook::cancel(int order_id,
   return CancelStatus::Ok;
 }
 
-void OrderBook::match_incoming(Order& incoming, std::vector<Trade>* trades) {
+void OrderBook::match_incoming(Order& incoming, std::vector<Trade>& trades) {
   auto& opp_map = incoming.is_buy ? sells_[incoming.instrument_id]
                                   : buys_[incoming.instrument_id];
-  // Look the price level up instead of indexing it: operator[] would insert an
-  // empty deque for every price ever quoted on the opposite side and never
-  // remove it again.
   const auto opp_it = opp_map.find(incoming.price);
   if (opp_it != opp_map.end()) {
     std::deque<int>& opp = opp_it->second;
 
     while (incoming.remaining_qty > 0) {
-      // Skip fronts that were cancelled or fully filled (lazy deletion).
       auto rest_it = by_id_.end();
       while (!opp.empty()) {
         rest_it = by_id_.find(opp.front());
@@ -92,7 +88,7 @@ void OrderBook::match_incoming(Order& incoming, std::vector<Trade>* trades) {
         tr.sell_fd = incoming.owner_fd;
         tr.sell_session = incoming.session_id;
       }
-      trades->push_back(tr);
+      trades.push_back(tr);
 
       if (rest.remaining_qty == 0) {
         opp.pop_front();

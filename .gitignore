@@ -1,10 +1,6 @@
-# Build artifacts: these are platform-specific and must never be committed or
-# shipped, since the submission is built and graded on FreeBSD.
 src/*.o
 src/*.d
 src/exchange_server
 src/trader
 src/market_data
-
-# macOS
 .DS_Store

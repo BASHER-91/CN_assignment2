@@ -1,6 +1,5 @@
 #include "net.hpp"
 
-#include <arpa/inet.h>
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
@@ -8,6 +7,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cstdlib>
 #include <cstring>
 
 void ignore_sigpipe() { signal(SIGPIPE, SIG_IGN); }
@@ -20,11 +20,6 @@ int set_nonblock(int fd) {
   return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
-int set_reuseaddr(int fd) {
-  int yes = 1;
-  return setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-}
-
 int set_nosigpipe(int fd) {
 #ifdef SO_NOSIGPIPE
   int yes = 1;
@@ -35,9 +30,18 @@ int set_nosigpipe(int fd) {
 #endif
 }
 
+bool parse_port(const char* text, int* port) {
+  char* end = nullptr;
+  const long value = std::strtol(text, &end, 10);
+  if (end == text || *end != '\0' || value <= 0 || value > 65535) {
+    return false;
+  }
+  *port = static_cast<int>(value);
+  return true;
+}
+
 static int lookup_ipv4(const std::string& host, int port, sockaddr_in* out) {
-  struct addrinfo hints;
-  std::memset(&hints, 0, sizeof(hints));
+  struct addrinfo hints{};
   hints.ai_family = AF_INET;
   hints.ai_socktype = SOCK_STREAM;
   hints.ai_flags = AI_NUMERICSERV;
@@ -48,7 +52,7 @@ static int lookup_ipv4(const std::string& host, int port, sockaddr_in* out) {
   if (rc != 0 || res == nullptr) {
     return -1;
   }
-  std::memcpy(out, res->ai_addr, sizeof(sockaddr_in));
+  std::memcpy(out, res->ai_addr, sizeof(*out));
   freeaddrinfo(res);
   return 0;
 }
@@ -58,13 +62,14 @@ int create_listen_socket(const std::string& host, int port) {
   if (fd < 0) {
     return -1;
   }
-  if (set_reuseaddr(fd) < 0 || set_nonblock(fd) < 0 || set_nosigpipe(fd) < 0) {
+  int yes = 1;
+  if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes)) < 0 ||
+      set_nonblock(fd) < 0 || set_nosigpipe(fd) < 0) {
     close(fd);
     return -1;
   }
 
-  sockaddr_in addr;
-  std::memset(&addr, 0, sizeof(addr));
+  sockaddr_in addr{};
   if (lookup_ipv4(host, port, &addr) < 0) {
     close(fd);
     return -1;
@@ -74,7 +79,6 @@ int create_listen_socket(const std::string& host, int port) {
     close(fd);
     return -1;
   }
-  // Large backlog helps accept bursts (70k bonus connection storms).
   if (listen(fd, 8192) < 0) {
     close(fd);
     return -1;
@@ -92,8 +96,7 @@ int connect_to(const std::string& host, int port) {
     return -1;
   }
 
-  sockaddr_in addr;
-  std::memset(&addr, 0, sizeof(addr));
+  sockaddr_in addr{};
   if (lookup_ipv4(host, port, &addr) < 0) {
     close(fd);
     return -1;

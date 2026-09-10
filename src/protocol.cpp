@@ -1,8 +1,6 @@
 #include "protocol.hpp"
 
-#include <cerrno>
 #include <cstdlib>
-#include <sstream>
 #include <vector>
 
 int parse_instrument(const std::string& token) {
@@ -46,7 +44,7 @@ static std::vector<std::string> split_ws(const std::string& line) {
 
 static bool parse_bounded_int(const std::string& s, long long lo, long long hi,
                               int* out) {
-  if (s.empty() || s[0] == '+' || s[0] == '-') {
+  if (s.empty()) {
     return false;
   }
   for (char c : s) {
@@ -54,12 +52,7 @@ static bool parse_bounded_int(const std::string& s, long long lo, long long hi,
       return false;
     }
   }
-  errno = 0;
-  char* end = nullptr;
-  const long long v = std::strtoll(s.c_str(), &end, 10);
-  if (errno == ERANGE || end == s.c_str() || *end != '\0') {
-    return false;
-  }
+  const long long v = std::strtoll(s.c_str(), nullptr, 10);
   if (v < lo || v > hi) {
     return false;
   }
@@ -81,7 +74,7 @@ Command parse_command(const std::string& raw) {
 
   const std::string& op = tok[0];
   if (op == "LOGIN") {
-    if (tok.size() != 2 || tok[1].empty()) {
+    if (tok.size() != 2) {
       cmd.error = "invalid username";
       return cmd;
     }
@@ -160,20 +153,20 @@ std::string msg_order_cancelled(int order_id) {
   return "ORDER_CANCELLED " + std::to_string(order_id);
 }
 
+static std::string execution_message(const char* type, int instrument, int qty,
+                                     int price) {
+  return std::string(type) + " " + instrument_name(instrument) + " " +
+         std::to_string(qty) + " " + std::to_string(price);
+}
+
 std::string msg_bought(int instrument, int qty, int price) {
-  std::ostringstream oss;
-  oss << "BOUGHT " << instrument_name(instrument) << " " << qty << " " << price;
-  return oss.str();
+  return execution_message("BOUGHT", instrument, qty, price);
 }
 
 std::string msg_sold(int instrument, int qty, int price) {
-  std::ostringstream oss;
-  oss << "SOLD " << instrument_name(instrument) << " " << qty << " " << price;
-  return oss.str();
+  return execution_message("SOLD", instrument, qty, price);
 }
 
 std::string msg_trade(int instrument, int qty, int price) {
-  std::ostringstream oss;
-  oss << "TRADE " << instrument_name(instrument) << " " << qty << " " << price;
-  return oss.str();
+  return execution_message("TRADE", instrument, qty, price);
 }

@@ -43,7 +43,6 @@ def cmd_partial_send(args):
         line += "\n"
     payload = line.encode("utf-8")
     sock = connect(args.host, args.port)
-    # Several send() calls so tcpdump / the server see a split application line.
     step = max(1, args.chunk)
     for i in range(0, len(payload), step):
         sock.sendall(payload[i : i + step])
@@ -73,7 +72,6 @@ def cmd_fin(args):
 
 def cmd_rst(args):
     sock = connect(args.host, args.port)
-    # linger 0: close() sends RST instead of a graceful FIN handshake.
     sock.setsockopt(
         socket.SOL_SOCKET,
         socket.SO_LINGER,
@@ -87,7 +85,6 @@ def cmd_slow_md(args):
     inst = args.instrument
     sock = connect(args.host, args.port)
     sock.sendall(("SUBSCRIBE %s\n" % inst).encode("utf-8"))
-    # Read the OK, then stop reading so the kernel recv buffer / server send-q fill.
     sock.settimeout(2.0)
     try:
         print(recv_some(sock, timeout=2.0), end="")
@@ -107,7 +104,6 @@ def cmd_trade_flood(args):
     sock.sendall(("LOGIN %s\n" % args.username).encode("utf-8"))
     sys.stdout.write(recv_some(sock, timeout=2.0))
     n = args.count
-    # Same-client self-match generates BOUGHT/SOLD and TRADE for subscribers.
     for i in range(n):
         sock.sendall(b"BUY JNST 1 7\nSELL JNST 1 7\n")
         if i % 100 == 99:
