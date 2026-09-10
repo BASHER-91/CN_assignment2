@@ -39,10 +39,16 @@ bool send_all(int fd, const std::string& data) {
   return true;
 }
 
-void queue_line(std::string* out_buf, const std::string& line) {
-  *out_buf += line;
+void strip_cr(std::string* line) {
+  if (!line->empty() && line->back() == '\r') {
+    line->pop_back();
+  }
+}
+
+void append_line(std::string* buf, const std::string& line) {
+  *buf += line;
   if (line.empty() || line.back() != '\n') {
-    out_buf->push_back('\n');
+    buf->push_back('\n');
   }
 }
 
@@ -69,9 +75,7 @@ void print_complete_lines(std::string* sock_buf) {
   while ((pos = sock_buf->find('\n')) != std::string::npos) {
     std::string line = sock_buf->substr(0, pos);
     sock_buf->erase(0, pos + 1);
-    if (!line.empty() && line.back() == '\r') {
-      line.pop_back();
-    }
+    strip_cr(&line);
     std::cout << line << std::endl;
   }
 }
@@ -79,10 +83,8 @@ void print_complete_lines(std::string* sock_buf) {
 }
 
 bool send_line(int fd, const std::string& line) {
-  std::string message = line;
-  if (message.empty() || message.back() != '\n') {
-    message.push_back('\n');
-  }
+  std::string message;
+  append_line(&message, line);
   return send_all(fd, message);
 }
 
@@ -143,7 +145,7 @@ int run_stdio_socket_loop(int sock) {
       if (n == 0) {
         stdin_open = false;
         shutdown_pending = true;
-        queue_line(&out_buf, "QUIT");
+        append_line(&out_buf, "QUIT");
       } else if (n < 0) {
         if (errno != EINTR) {
           return 1;
@@ -154,13 +156,11 @@ int run_stdio_socket_loop(int sock) {
         while ((pos = stdin_buf.find('\n')) != std::string::npos) {
           std::string line = stdin_buf.substr(0, pos);
           stdin_buf.erase(0, pos + 1);
-          if (!line.empty() && line.back() == '\r') {
-            line.pop_back();
-          }
+          strip_cr(&line);
           if (line.empty()) {
             continue;
           }
-          queue_line(&out_buf, line);
+          append_line(&out_buf, line);
           if (line == "QUIT") {
             stdin_open = false;
             shutdown_pending = true;
